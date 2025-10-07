@@ -3,12 +3,6 @@
     "description": "2025년 주간 RSI 데이터",
     "weeks": [
       {
-        "start": "2025-07-14",
-        "end": "2025-07-18",
-        "week": 29,
-        "rsi": 82.65
-      },
-      {
         "start": "2025-07-21",
         "end": "2025-07-25",
         "week": 30,
@@ -73,11 +67,17 @@
         "end": "2025-10-03",
         "week": 40,
         "rsi": 76.86
+      },
+      {
+        "start": "2025-10-06",
+        "end": "2025-10-10",
+        "week": 41,
+        "rsi": 74.81
       }
     ]
   },
   "metadata": {
-    "last_updated": "2025-10-05",
+    "last_updated": "2025-10-08",
     "total_years": 1,
     "total_weeks": 12,
     "description": "QQQ 주간 RSI 참조 데이터 (14주 Wilder's RSI)"

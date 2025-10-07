@@ -1,0 +1,77 @@
+    def get_stock_data(self, symbol: str, period: str = "1mo") -> Optional[pd.DataFrame]:
+        """
+        Yahoo Finance API를 통해 주식 데이터 가져오기
+        Args:
+            symbol: 주식 심볼 (예: "SOXL", "QQQ")
+            period: 기간 (1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max)
+        Returns:
+            DataFrame: 주식 데이터 (Date, Open, High, Low, Close, Volume)
+        """
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            # 15y가 지원되지 않으면 10y로 대체
+            if period == "15y":
+                # 먼저 15y 시도, 실패하면 10y로 대체
+                params_list = [{'range': '15y', 'interval': '1d'}, {'range': '10y', 'interval': '1d'}]
+            else:
+                params_list = [{'range': period, 'interval': '1d'}]
+            
+            print(f"📊 {symbol} 데이터 가져오는 중...")
+            
+            # 여러 파라미터 시도
+            for i, params in enumerate(params_list):
+                try:
+                    print(f"   시도 {i+1}/{len(params_list)}: range={params['range']}")
+                    response = requests.get(url, headers=headers, params=params, timeout=15)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        
+                        if 'chart' in data and 'result' in data['chart'] and data['chart']['result']:
+                            result = data['chart']['result'][0]
+                            
+                            if 'timestamp' in result and 'indicators' in result:
+                                timestamps = result['timestamp']
+                                quote_data = result['indicators']['quote'][0]
+                                
+                                # DataFrame 생성
+                                df_data = {
+                                    'Date': [datetime.fromtimestamp(ts) for ts in timestamps],
+                                    'Open': quote_data.get('open', [None] * len(timestamps)),
+                                    'High': quote_data.get('high', [None] * len(timestamps)),
+                                    'Low': quote_data.get('low', [None] * len(timestamps)),
+                                    'Close': quote_data.get('close', [None] * len(timestamps)),
+                                    'Volume': quote_data.get('volume', [None] * len(timestamps))
+                                }
+                                
+                                df = pd.DataFrame(df_data)
+                                df = df.dropna()  # NaN 값 제거
+                                df.set_index('Date', inplace=True)
+                                
+                                print(f"✅ {symbol} 데이터 가져오기 성공! ({len(df)}일치 데이터)")
+                                return df
+                            else:
+                                print(f"   ❌ 차트 데이터 구조 오류")
+                        else:
+                            print(f"   ❌ 차트 결과 없음")
+                    else:
+                        print(f"   ❌ HTTP 오류: {response.status_code}")
+                        
+                except Exception as e:
+                    print(f"   ❌ 요청 오류: {e}")
+                    
+                # 마지막 시도가 아니면 계속
+                if i < len(params_list) - 1:
+                    print(f"   다음 파라미터로 재시도...")
+            
+            print(f"❌ {symbol} 모든 파라미터 시도 실패")
+            return None
+                
+        except Exception as e:
+            print(f"❌ {symbol} 데이터 가져오기 오류: {e}")
+            return None

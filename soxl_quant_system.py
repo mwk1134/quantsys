@@ -9,6 +9,8 @@ from openpyxl.styles import Font, PatternFill, Alignment
 import os
 
 import sys
+import io
+from contextlib import redirect_stdout
 
 
 class SOXLQuantTrader:
@@ -155,15 +157,15 @@ class SOXLQuantTrader:
             
             # 기존 RSI 데이터 로드
             if os.path.exists(file_path):
-                print(f"🔍 JSON 파일 로드 시도: {file_path}")
+                #print(f"🔍 JSON 파일 로드 시도: {file_path}")
                 with open(file_path, 'r', encoding='utf-8') as f:
                     existing_data = json.load(f)
                 
                 # 디버깅: 로드된 데이터 구조 확인
                 print(f"✅ JSON 파일 로드 성공!")
-                print(f"   - 파일 크기: {os.path.getsize(file_path)} bytes")
-                print(f"   - 로드된 키들: {list(existing_data.keys())}")
-                print(f"   - 총 연도 수: {len([k for k in existing_data.keys() if k != 'metadata'])}")
+                #print(f"   - 파일 크기: {os.path.getsize(file_path)} bytes")
+                #print(f"   - 로드된 키들: {list(existing_data.keys())}")
+                #print(f"   - 총 연도 수: {len([k for k in existing_data.keys() if k != 'metadata'])}")
                 
                 # 2024년, 2025년 데이터 확인
                 if '2024' in existing_data:
@@ -408,6 +410,52 @@ class SOXLQuantTrader:
         # 투자원금 관리 (10거래일마다 업데이트)
         self.current_investment_capital = initial_capital
         self.trading_days_count = 0  # 거래일 카운터
+        
+        # 세션 상태: 사용자 입력 시작일 (파일 저장 없음)
+        self.session_start_date: Optional[str] = None
+        
+        # 테스트용 오늘 날짜 오버라이드 (YYYY-MM-DD)
+        self.test_today_override: Optional[str] = None
+
+    def set_test_today(self, date_str: Optional[str]):
+        """테스트용 오늘 날짜 설정/해제. None 또는 빈문자면 해제."""
+        if not date_str:
+            self.test_today_override = None
+            print("🧪 테스트 날짜 해제됨 (실제 오늘 날짜 사용)")
+            return
+        try:
+            # 형식 검증
+            _ = datetime.strptime(date_str, "%Y-%m-%d")
+            self.test_today_override = date_str
+            print(f"🧪 테스트 날짜 설정: {date_str}")
+        except ValueError:
+            print("❌ 날짜 형식이 올바르지 않습니다. YYYY-MM-DD 형식으로 입력해주세요.")
+
+    def get_today_date(self) -> datetime:
+        """오버라이드된 오늘 날짜(자정)를 datetime으로 반환."""
+        if self.test_today_override:
+            d = datetime.strptime(self.test_today_override, "%Y-%m-%d").date()
+            return datetime(d.year, d.month, d.day)
+        return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def simulate_from_start_to_today(self, start_date: str, quiet: bool = True) -> Dict:
+        """
+        시작일부터 최근 거래일까지 시뮬레이션 수행하여 현재 포지션 상태를 맞춘다.
+        Args:
+            start_date: YYYY-MM-DD 형식 시작일
+            quiet: 출력 억제 여부 (기본 True)
+        Returns:
+            Dict: run_backtest 요약 결과
+        """
+        latest_trading_day = self.get_latest_trading_day()
+        end_date_str = latest_trading_day.strftime('%Y-%m-%d')
+        if quiet:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                result = self.run_backtest(start_date, end_date_str)
+            return result
+        else:
+            return self.run_backtest(start_date, end_date_str)
     
     def is_market_closed(self, date: datetime) -> bool:
         """
@@ -427,6 +475,29 @@ class SOXLQuantTrader:
             return True
         
         return False
+
+    def _is_dst_approx(self, dt_utc: datetime) -> bool:
+        """미국 서머타임 대략 판별 (3~10월은 DST라고 가정)."""
+        return 3 <= dt_utc.month <= 10
+
+    def get_us_eastern_now(self) -> datetime:
+        """미국 동부시간(ET) 현재시각 (DST 단순 가정)."""
+        if self.test_today_override:
+            # 테스트 날짜 기준 정오(12:00) ET로 간주
+            d = datetime.strptime(self.test_today_override, "%Y-%m-%d")
+            return datetime(d.year, d.month, d.day, 12, 0, 0)
+        now_utc = datetime.utcnow()
+        offset_hours = 4 if self._is_dst_approx(now_utc) else 5
+        return now_utc - timedelta(hours=offset_hours)
+
+    def is_regular_session_closed_now(self) -> bool:
+        """정규장(09:30~16:00 ET) 기준으로 오늘 장이 마감됐는지 여부."""
+        et_now = self.get_us_eastern_now()
+        # 거래일이 아니면(주말/휴장일) '이미 마감'으로 간주
+        if not self.is_trading_day(et_now):
+            return True
+        # 16:00 ET 이후면 마감
+        return et_now.hour > 16 or (et_now.hour == 16 and et_now.minute >= 0)
     
     def get_latest_trading_day(self) -> datetime:
         """
@@ -434,7 +505,7 @@ class SOXLQuantTrader:
         Returns:
             datetime: 가장 최근 거래일
         """
-        today = datetime.now()
+        today = self.get_today_date()
         while self.is_market_closed(today):
             today -= timedelta(days=1)
         return today
@@ -517,6 +588,41 @@ class SOXLQuantTrader:
             print(f"❌ {symbol} 데이터 가져오기 오류: {e}")
             return None
     
+    def get_intraday_last_price(self, symbol: str) -> Optional[Tuple[datetime, float]]:
+        """
+        분봉(1m) 기준으로 오늘의 최신 가격을 가져온다.
+        Returns:
+            Optional[Tuple[datetime, float]]: (마지막 시각, 마지막 가격)
+        """
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            params = {'range': '1d', 'interval': '1m'}
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            result = data.get('chart', {}).get('result', [])
+            if not result:
+                return None
+            result0 = result[0]
+            timestamps = result0.get('timestamp') or []
+            indicators = result0.get('indicators', {})
+            quotes = indicators.get('quote', [])
+            if not timestamps or not quotes:
+                return None
+            closes = quotes[0].get('close') or []
+            # 마지막 유효 값 찾기
+            for ts, close_val in reversed(list(zip(timestamps, closes))):
+                if close_val is not None:
+                    ts_dt = datetime.utcfromtimestamp(ts)
+                    return ts_dt, float(close_val)
+            return None
+        except Exception:
+            return None
+
 
     def calculate_weekly_rsi(self, df: pd.DataFrame, window: int = 14) -> float:
         """
@@ -1232,6 +1338,15 @@ class SOXLQuantTrader:
         except ValueError:
             return {"error": "날짜 형식이 올바르지 않습니다. YYYY-MM-DD 형식으로 입력해주세요."}
         
+        # 장 마감 전에는 종료일을 확정된 최신 거래일로 강제 보정
+        try:
+            if not self.is_regular_session_closed_now():
+                latest_trading_day = self.get_latest_trading_day().date()
+                effective_end_date = min(end_dt.date(), latest_trading_day)
+                end_dt = datetime(effective_end_date.year, effective_end_date.month, effective_end_date.day, 23, 59, 59)
+        except Exception:
+            pass
+        
 
         # 충분한 기간의 데이터 가져오기
         data_start = start_dt - timedelta(days=180)
@@ -1261,7 +1376,29 @@ class SOXLQuantTrader:
         if qqq_data is None:
             return {"error": "QQQ 데이터를 가져올 수 없습니다."}
         
-        # 백테스팅 기간 데이터 필터링
+        # 정규장 미마감이고, 마지막 인덱스 날짜가 오늘이면 무조건 제외 (공급사 조기 생성 일봉 방지)
+        try:
+            if not self.is_regular_session_closed_now():
+                today_date = datetime.now().date()
+                if len(soxl_data) > 0 and soxl_data.index.max().date() == today_date:
+                    soxl_data = soxl_data[soxl_data.index.date < today_date]
+                if len(qqq_data) > 0 and qqq_data.index.max().date() == today_date:
+                    qqq_data = qqq_data[qqq_data.index.date < today_date]
+        except Exception:
+            pass
+
+        # 종료일이 데이터의 마지막 날짜와 같고, 정규장이 아직 마감되지 않았다면 마지막 행 제외
+        try:
+            if end_date:
+                end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
+                last_date = soxl_data.index.max().date() if len(soxl_data) > 0 else None
+                if last_date and end_d == last_date and not self.is_regular_session_closed_now():
+                    soxl_data = soxl_data[soxl_data.index.date < last_date]
+                    qqq_data = qqq_data[qqq_data.index.date < last_date]
+        except Exception:
+            pass
+        
+        # 백테스팅 기간 데이터 필터링 (기존 방식: 타임스탬프 비교)
         soxl_backtest = soxl_data[soxl_data.index >= start_dt]
         soxl_backtest = soxl_backtest[soxl_backtest.index <= end_dt]
         
@@ -1978,6 +2115,12 @@ def main():
     # 트레이더 초기화
     trader = SOXLQuantTrader(initial_capital)
     
+    # 시작일 입력(엔터 시 1년 전)
+    start_date_input = input("📅 투자 시작일을 입력하세요 (YYYY-MM-DD, 엔터시 1년 전): ").strip()
+    if not start_date_input:
+        start_date_input = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+    trader.session_start_date = start_date_input
+    
     while True:
         print("\n" + "=" * 50)
         print("메뉴를 선택하세요:")
@@ -1986,16 +2129,30 @@ def main():
         print("3. 백테스팅 실행")
         print("4. 매수 실행 (테스트)")
         print("5. 매도 실행 (테스트)")
+        print("T. 테스트 날짜(오늘) 설정/해제")
         print("6. 종료")
         
         choice = input("\n선택 (1-6): ").strip()
         
         if choice == '1':
+            # 저장된 시작일부터 오늘까지 시뮬레이션으로 현재 상태 산출
+            start_date = trader.session_start_date or (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+            sim_result = trader.simulate_from_start_to_today(start_date, quiet=True)
+            if "error" in sim_result:
+                print(f"❌ 시뮬레이션 실패: {sim_result['error']}")
+            
+            # 현재 상태 기반 오늘의 추천 출력
             recommendation = trader.get_daily_recommendation()
             trader.print_recommendation(recommendation)
             
         elif choice == '2':
-            # 포트폴리오만 간단히 출력
+            # 저장된 시작일부터 오늘까지 시뮬레이션으로 현황 재계산
+            start_date = trader.session_start_date or (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+            sim_result = trader.simulate_from_start_to_today(start_date, quiet=True)
+            if "error" in sim_result:
+                print(f"❌ 시뮬레이션 실패: {sim_result['error']}")
+            
+            # 기존 형식 유지하여 현황 출력
             if trader.positions:
                 print("\n💼 현재 포트폴리오:")
                 print("-" * 30)
@@ -2059,6 +2216,12 @@ def main():
             
         elif choice == '5':
             print("\n🔧 매도 테스트 기능 (개발 중)")
+            
+        elif choice.lower() == 't':
+            print("\n🧪 테스트 날짜 설정")
+            print("- 비우고 엔터하면 해제됩니다")
+            test_date = input("테스트 오늘 날짜 (YYYY-MM-DD): ").strip()
+            trader.set_test_today(test_date if test_date else None)
             
         elif choice == '6':
             print("프로그램을 종료합니다.")
